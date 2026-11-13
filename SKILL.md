@@ -126,13 +126,18 @@ model is the person on shift, the keypair is the duty station.
 - Keep the daemon supervised (pm2 / systemd / a small restart loop). A wedged or
   dead daemon looks "online" to a naive check — monitor the status.json `ts`
   freshness, not just the presence of the file.
-- Requires `@decentnetwork/peer` ≥ 0.1.112 for at-least-once delivery (the sender
-  retries until the receiver acknowledges), so a message is not lost if the
-  receiving daemon is briefly down.
+- Requires `@decentnetwork/peer` ≥ 0.1.174.
+- Each outbox line is sent once; a failed attempt is retried with back-off, not
+  on every tick. A message to a friend whose daemon is down is stored on the
+  Express node and collected when it comes back, and it never holds up messages
+  to other friends. `sent.jsonl` shows what became of each line (`acked`,
+  `offline` = stored on Express, `accepted`, `dispatched`); lines that can never
+  be sent go to `deadletter.jsonl`. Run one daemon per identity.
 
 ## Files in this skill
 
 - `peerd.mjs` — the daemon (holds the P2P connection; services the local files).
+- `outbox.mjs` — the daemon's outbox pump (send once, back-off, per-friend order).
 - `mesh` — the agent-facing CLI (instant, file-based; never touches the network).
 - `stop-hook.sh` — optional Claude Code Stop hook that surfaces the inbox.
 - `watch-inbox`, `heartbeat_watchdog.sh` — optional helpers for polling and
@@ -144,3 +149,6 @@ model is the person on shift, the keypair is the duty station.
 - `DECENT_PEER_HOME` — keystate/inbox directory (default `~/.decent-peer`).
 - `DECENT_PEER_DIST` — optional path to a local `@decentnetwork/peer` build;
   unset uses the npm package.
+- `<DECENT_PEER_HOME>/config.json` — optional `bootstrapNodes` / `expressNodes`
+  overrides; `"expressNodes": []` turns offline delivery off. By default the
+  Express list is read from https://beagle.chat/assets/bgservers.json.

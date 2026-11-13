@@ -4,13 +4,19 @@
 // Holds ONE warm Carrier connection so the agent never pays DHT-join latency
 // per message. The agent interacts only with local files (no network in the
 // agent's own commands):
-//   inbox.jsonl    <- daemon appends every received text  {ts,from,text}
-//   outbox.jsonl   -> agent appends commands; daemon sends them:
-//                       {"type":"send","to":"<userid>","text":"..."}
-//                       {"type":"friend","to":"<address>","hello":"..."}
-//   requests.jsonl <- daemon appends incoming friend requests {ts,from,hello}
-//   friends.json   <- daemon snapshots peer.friends()
-//   status.json    <- {address,userid,online,joined,ts}
+//   inbox.jsonl     <- daemon appends every received text  {ts,from,text,via}
+//   outbox.jsonl    -> agent appends commands; daemon sends them:
+//                        {"type":"send","to":"<userid>","text":"..."}
+//                        {"type":"friend","to":"<address>","hello":"..."}
+//                        {"type":"accept","to":"<userid>"}
+//   sent.jsonl      <- one receipt per finished outbox line {ts,line,type,to,delivery,attempts}
+//   deadletter.jsonl <- outbox lines that can never be sent (bad id, not a friend, gave up)
+//   requests.jsonl  <- daemon appends incoming friend requests {ts,from,hello}
+//   friends.json    <- daemon snapshots peer.friends()
+//   status.json     <- {address,userid,online,joined,express,ts}
+// Offline delivery: messages to a friend whose daemon is down go to the Express
+// store-and-forward node (from https://beagle.chat/assets/bgservers.json) and are
+// collected when it comes back.
 // Trusted 2+-agent mesh: auto-accepts friend requests from IDs listed in
 // ~/.decent-peer/allow.txt (one userid/address per line); others just logged.
 //
@@ -19,57 +25,81 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createOutbox } from "./outbox.mjs";
 
 const HOME = process.env.DECENT_PEER_HOME || join(homedir(), ".decent-peer");
 mkdirSync(HOME, { recursive: true });
 const P = (f) => join(HOME, f);
 const NAME = process.env.AGENT_NAME || "agent";
+const now = () => new Date().toISOString();
+const log = (m) => console.log(`[${now()}] ${m}`);
 
 // Prefer the published npm package (portable to any Node machine); fall back to
 // a local repo build only if DECENT_PEER_DIST is explicitly set.
-let Peer;
+let sdk;
 try {
-  ({ Peer } = await import("@decentnetwork/peer"));
+  sdk = await import("@decentnetwork/peer");
 } catch (err) {
   if (!process.env.DECENT_PEER_DIST) throw err;
-  ({ Peer } = await import(process.env.DECENT_PEER_DIST));
+  sdk = await import(process.env.DECENT_PEER_DIST);
 }
+const { Peer, carrierIdFromAddress } = sdk;
 
-const BOOTSTRAPS = (() => {
-  const cfg = join(HOME, "config.json");
-  if (existsSync(cfg)) {
-    try { const c = JSON.parse(readFileSync(cfg, "utf8")); if (c.bootstrapNodes) return c.bootstrapNodes; } catch {}
-  }
+// ~/.decent-peer/config.json may set "bootstrapNodes" and/or "expressNodes"
+// (each [{host,port,pk}]). "expressNodes": [] turns offline delivery off.
+const CONFIG = (() => {
+  try { return existsSync(P("config.json")) ? JSON.parse(readFileSync(P("config.json"), "utf8")) : {}; }
+  catch (e) { log(`config.json unreadable (${e.message}); using defaults`); return {}; }
+})();
+
+const BOOTSTRAPS = CONFIG.bootstrapNodes ?? [
   // Decent Network public DHT bootstrap nodes — geographically diverse so a
-  // fresh peer can always find at least one. Put your own in
-  // ~/.decent-peer/config.json {"bootstrapNodes":[...]} to override.
-  return [
-    // US-East
-    { host: "13.58.208.50", port: 33445, pk: "89vny8MrKdDKs7Uta9RdVmspPjnRMdwMmaiEW27pZ7gh" },
-    { host: "18.216.102.47", port: 33445, pk: "G5z8MqiNDFTadFUPfMdYsYtkUDbX5mNCMVHMZtsCnFeb" },
-    { host: "18.216.6.197", port: 33445, pk: "H8sqhRrQuJZ6iLtP2wanxt4LzdNrN2NNFnpPdq1uJ9n2" },
-    // US-West
-    { host: "54.193.141.205", port: 33445, pk: "7TfZWZNV8vnBxxWzJXuvKgX2QyKkLpg2oXx3LQ5tg8LW" },
-    // Global
-    { host: "154.64.235.176", port: 33445, pk: "GdNtV2N74fZnLjhH7NhQ18nGdxb1k8jRM9dQaK7WnxmL" },
-    // Asia-Pacific (Singapore + China); one on port 443 for networks that block 33445
-    { host: "52.74.215.181", port: 33445, pk: "Xv6d34WaUw9bPn7YihzVAFw7D2igbQJZ3jwmzzfYVFV" },
-    { host: "47.100.103.201", port: 33445, pk: "CX1XH419p4xJ5SV4KvDxBeKYSRdMJW9QpdWJY8owUxHd" },
-    { host: "52.83.171.135", port: 443, pk: "5tuHgK1Q4CYf4K5PutsEPK5E3Z7cbtEBdx7LwmdzqXHL" },
-    { host: "52.83.191.228", port: 33445, pk: "3khtxZo89SBScAMaHhTvD68pPHiKxgZT6hTCSZZVgNEm" },
-  ];
+  // fresh peer can always find at least one.
+  // US-East
+  { host: "13.58.208.50", port: 33445, pk: "89vny8MrKdDKs7Uta9RdVmspPjnRMdwMmaiEW27pZ7gh" },
+  { host: "18.216.102.47", port: 33445, pk: "G5z8MqiNDFTadFUPfMdYsYtkUDbX5mNCMVHMZtsCnFeb" },
+  { host: "18.216.6.197", port: 33445, pk: "H8sqhRrQuJZ6iLtP2wanxt4LzdNrN2NNFnpPdq1uJ9n2" },
+  // US-West
+  { host: "54.193.141.205", port: 33445, pk: "7TfZWZNV8vnBxxWzJXuvKgX2QyKkLpg2oXx3LQ5tg8LW" },
+  // Global
+  { host: "154.64.235.176", port: 33445, pk: "GdNtV2N74fZnLjhH7NhQ18nGdxb1k8jRM9dQaK7WnxmL" },
+  // Asia-Pacific; one on port 443 for networks that block 33445
+  { host: "52.74.215.181", port: 33445, pk: "Xv6d34WaUw9bPn7YihzVAFw7D2igbQJZ3jwmzzfYVFV" },
+  { host: "47.100.103.201", port: 33445, pk: "CX1XH419p4xJ5SV4KvDxBeKYSRdMJW9QpdWJY8owUxHd" },
+  { host: "52.83.171.135", port: 443, pk: "5tuHgK1Q4CYf4K5PutsEPK5E3Z7cbtEBdx7LwmdzqXHL" },
+  { host: "52.83.191.228", port: 33445, pk: "3khtxZo89SBScAMaHhTvD68pPHiKxgZT6hTCSZZVgNEm" },
+];
+
+// Express = the offline mailbox (HTTPS store-and-forward). @decentnetwork/peer has
+// NO default: without expressNodes a message to an offline friend cannot be stored.
+// Read the live list the Beagle apps use; fall back to the node it listed on 2026-11-12.
+const SERVERS_URL = "https://beagle.chat/assets/bgservers.json";
+const EXPRESS_FALLBACK = [{ host: "lens.beagle.chat", port: 443, pk: "ECbs4GxwGzxGerNkmqDJFibEmevu8jAXqAZtikccvD95" }];
+const EXPRESS = await (async () => {
+  if (Array.isArray(CONFIG.expressNodes)) return CONFIG.expressNodes;
+  try {
+    const list = await (await fetch(SERVERS_URL, { signal: AbortSignal.timeout(8000) })).json();
+    const nodes = (list.expressNodes ?? [])
+      .map((n) => ({ host: n.ipv4 ?? n.host, port: Number(n.port), pk: n.publicKey ?? n.pk }))
+      .filter((n) => n.host && n.port && n.pk);
+    if (nodes.length) return nodes;
+    log(`${SERVERS_URL} lists no expressNodes; using the built-in one`);
+  } catch (e) { log(`could not read ${SERVERS_URL} (${e.message}); using the built-in Express node`); }
+  return EXPRESS_FALLBACK;
 })();
 
 const allow = () => existsSync(P("allow.txt"))
   ? readFileSync(P("allow.txt"), "utf8").split("\n").map((s) => s.trim()).filter(Boolean)
   : [];
-const now = () => new Date().toISOString();
-const log = (m) => console.log(`[${now()}] ${m}`);
 
 const peer = await Peer.create({
-  keyFile: P("peer.save"), bootstrapNodes: BOOTSTRAPS, compatibilityMode: "legacy", debugLabel: NAME,
+  keyFile: P("peer.save"), bootstrapNodes: BOOTSTRAPS, expressNodes: EXPRESS,
+  compatibilityMode: "legacy", debugLabel: NAME,
 });
-await peer.start();
+log(`express ${EXPRESS.length ? EXPRESS.map((n) => `${n.host}:${n.port}`).join(", ") : "off (config.json expressNodes: [])"}`);
+
+// Handlers go in BEFORE start(): start() begins pulling Express, and a message
+// pulled before onText exists would be lost.
 
 // Receiver-side dedup (mesh bug #3): a peer that replays its outbox (cursor reset) re-delivers
 // every old message. Drop an identical (from,text) seen within DEDUP_MS. PERSISTENT across restarts
@@ -88,8 +118,9 @@ peer.onText((msg) => {
   for (const [k, ts] of _seen) if (t - ts > DEDUP_MS) _seen.delete(k);
   if (_seen.has(key)) { log(`DEDUP drop ${msg.pubkey}: ${msg.text.slice(0, 48)}`); return; }
   _seen.set(key, t); _persistSeen();
-  appendFileSync(P("inbox.jsonl"), JSON.stringify({ ts: now(), from: msg.pubkey, text: msg.text }) + "\n");
-  log(`RECV ${msg.pubkey}: ${msg.text}`);
+  const via = msg.via ?? "online";
+  appendFileSync(P("inbox.jsonl"), JSON.stringify({ ts: now(), from: msg.pubkey, text: msg.text, via }) + "\n");
+  log(`RECV ${msg.pubkey} (${via}): ${msg.text}`);
 });
 peer.onFriendRequest(async (req) => {
   const from = req.userid ?? req.pubkey;
@@ -101,8 +132,15 @@ peer.onFriendRequest(async (req) => {
   }
 });
 
-writeFileSync(P("status.json"), JSON.stringify(
-  { name: NAME, address: peer.address(), userid: peer.userid(), online: true, joined: false, ts: now() }, null, 2));
+await peer.start();
+
+const expressStatus = () => {
+  try { return (peer.expressHealth?.() ?? []).map((h) => ({ node: h.node, ok: h.fails === 0 && h.lastOkMs > 0, doorbell: h.doorbell })); }
+  catch { return []; }
+};
+const writeStatus = (joined) => writeFileSync(P("status.json"), JSON.stringify(
+  { name: NAME, address: peer.address(), userid: peer.userid(), online: true, joined, express: expressStatus(), ts: now() }, null, 2));
+writeStatus(false);
 log(`address ${peer.address()}`);
 log(`userid  ${peer.userid()}`);
 
@@ -112,64 +150,29 @@ for (let attempt = 1; ; attempt++) {
   catch (e) { log(`join attempt ${attempt} failed: ${e.message} — retrying in 10s`); await new Promise((r) => setTimeout(r, 10000)); }
 }
 for (let i = 0; i < 3; i++) { try { const n = await peer.announceSelf(45000); if (n.length) break; } catch (e) { log(`announce retry: ${e.message}`); } }
-writeFileSync(P("status.json"), JSON.stringify(
-  { name: NAME, address: peer.address(), userid: peer.userid(), online: true, joined: true, ts: now() }, null, 2));
+writeStatus(true);
 log("joined + announced — inbox live");
 
 // Heartbeat (mesh bug #3): a live daemon must refresh status.json ts, or
 // monitoring reads a stale "joined true" from a wedged/dead process.
-setInterval(() => { try { writeFileSync(P("status.json"), JSON.stringify(
-  { name: NAME, address: peer.address(), userid: peer.userid(), online: true, joined: true, ts: now() }, null, 2)); } catch {} }, 30000);
+setInterval(() => { try { writeStatus(true); } catch {} }, 30000);
 
 // re-announce so we stay reachable
 setInterval(() => peer.announceSelf(20000).catch(() => {}), 120000);
-setInterval(() => { try { writeFileSync(P("friends.json"), JSON.stringify(peer.friends(), null, 2)); } catch {} }, 30000);
+const snapshotFriends = () => { try { writeFileSync(P("friends.json"), JSON.stringify(peer.friends(), null, 2)); } catch {} };
+snapshotFriends();
+setInterval(snapshotFriends, 30000);
 
-// outbox pump: poll for new command lines, send via the warm connection.
-// Cursor discipline (mesh bug #3): RESUME from the persisted .outbox.cursor across restarts
-// (so messages appended while peerd was down still send, and we never replay history). Only a
-// truly fresh outbox (no persisted cursor) skips to the end.
-let cursor = 0;
-{
-  const nLines = existsSync(P("outbox.jsonl"))
-    ? readFileSync(P("outbox.jsonl"), "utf8").split("\n").filter(Boolean).length : 0;
-  if (existsSync(P(".outbox.cursor"))) {
-    cursor = Math.min(Math.max(0, Number(readFileSync(P(".outbox.cursor"), "utf8")) || 0), nLines);
-  } else {
-    cursor = nLines; // first run ever: don't replay pre-existing history
-  }
-  writeFileSync(P(".outbox.cursor"), String(cursor));
-}
-const retries = new Map(); // outbox line index -> failed attempts (mesh bug #2)
-setInterval(async () => {
-  if (!existsSync(P("outbox.jsonl"))) return;
-  const lines = readFileSync(P("outbox.jsonl"), "utf8").split("\n").filter(Boolean);
-  // Outbox truncated/rotated below our position -> assume those lines were already delivered and
-  // clamp; do NOT reset to 0 (that was the bug that replayed the whole outbox = 141 dupes).
-  if (cursor > lines.length) cursor = lines.length;
-  for (; cursor < lines.length; cursor++) {
-    let cmd; try { cmd = JSON.parse(lines[cursor]); } catch { continue; }
-    try {
-      if (cmd.type === "send") { await peer.sendText(cmd.to, cmd.text); log(`SENT ${cmd.to}: ${cmd.text}`); }
-      else if (cmd.type === "friend") { await peer.sendFriendRequest(cmd.to, cmd.hello ?? `hello from ${NAME}`); log(`FRIEND-REQ -> ${cmd.to}`); }
-      else if (cmd.type === "accept") { await peer.acceptFriendRequest(cmd.to); log(`ACCEPTED ${cmd.to}`); }
-    } catch (e) {
-      // Mesh bug #2 (sender side): a failed send must NOT advance the cursor —
-      // that silently drops the message forever (5 work orders lost 07-18).
-      // With peer >=0.1.112 sendText throws when the receiver never ACKs; stop
-      // here and retry this same line next tick until it delivers. Watchdogs
-      // keep daemons up, so head-of-line blocking is bounded to minutes.
-      retries.set(cursor, (retries.get(cursor) ?? 0) + 1);
-      if (retries.get(cursor) % 40 === 1) log(`outbox cmd failed (${cmd.type} ${cmd.to}) attempt ${retries.get(cursor)}: ${e.message} — will retry, NOT advancing cursor`);
-      break;
-    }
-  }
-  writeFileSync(P(".outbox.cursor"), String(cursor));
-}, 1500);
+// Outbox pump: each line becomes one job; sent once, retried with back-off only after a failure,
+// one job at a time per recipient (see outbox.mjs). An offline friend's text goes to Express.
+const toUserid = (s) => { try { return carrierIdFromAddress(s); } catch { return s; } };
+const outbox = createOutbox({ peer, home: HOME, hasExpress: EXPRESS.length > 0, toUserid, log, name: NAME });
+outbox.start();
 
 process.on("unhandledRejection", (e) => log(`unhandledRejection: ${e?.message ?? e}`));
 // Mesh bug #1 evidence: never exit silently — every death leaves a trace.
 process.on("uncaughtException", (e) => { log(`uncaughtException: ${e?.stack ?? e}`); process.exit(1); });
 process.on("exit", (code) => { try { log(`process exit code=${code}`); } catch {} });
-process.on("SIGINT", async () => { await peer.stop().catch(() => {}); process.exit(0); });
-process.on("SIGTERM", async () => { await peer.stop().catch(() => {}); process.exit(0); });
+const shutdown = async () => { outbox.stop(); await peer.stop().catch(() => {}); process.exit(0); };
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

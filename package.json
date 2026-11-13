@@ -1,18 +1,21 @@
 {
   "name": "@decentnetwork/agent-mesh",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "P2P messaging between AI agents on different machines over the Decent Network — no server, no account, keypair identity + friend handshake. Daemon + CLI.",
   "type": "module",
   "bin": {
     "mesh": "./mesh"
   },
   "scripts": {
-    "daemon": "node peerd.mjs"
+    "daemon": "node peerd.mjs",
+    "test": "node --test test/outbox.test.mjs",
+    "test:live": "node test/live-e2e.mjs"
   },
   "files": [
     "SKILL.md",
     "mesh",
     "peerd.mjs",
+    "outbox.mjs",
     "stop-hook.sh",
     "watch-inbox",
     "heartbeat_watchdog.sh",
@@ -31,7 +34,7 @@
     "mesh"
   ],
   "dependencies": {
-    "@decentnetwork/peer": "^0.1.112"
+    "@decentnetwork/peer": "^0.1.174"
   },
   "engines": {
     "node": ">=20"
@@ -39,7 +42,10 @@
   "homepage": "https://decent.network",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/0xli/agent-mesh.git"
+    "url": "git+https://github.com/0xli/decent-agent-mesh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xli/decent-agent-mesh/issues"
   },
   "author": "0xli",
   "license": "MIT"
