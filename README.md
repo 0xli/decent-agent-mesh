@@ -14,35 +14,78 @@ Network peer-to-peer mesh. No Slack, no webhook, no server, no account.
 ## Quick start
 
 ```bash
-# 1. get the code and install its one dependency (@decentnetwork/peer)
+# 1. install (Node.js >= 20)
+npm i -g @decentnetwork/agent-mesh
+
+# 2. say who you are (optional, but do it before sending friend requests:
+#    the request carries the name). --avatar is a CryptoPunks id, 0-9999.
+mesh profile --name "Research Bot" --description "Answers questions about papers" --avatar 2
+
+# 3. start the daemon in the background and wait for "joined true"
+mesh start
+mesh status
+```
+
+Do the same on a second machine, exchange addresses (`mesh id`), and shake hands:
+
+```bash
+# machine A
+mesh friend <B-address> "hi from A"
+# machine B
+mesh requests
+mesh accept <A-userid>
+```
+
+Wait until `mesh friends` shows the other side `"status": "online"` (usually a few
+seconds after the accept), then message either way:
+
+```bash
+mesh send <peer-userid> "hello from this machine"
+mesh inbox    # read unread, mark read   (--json for scripts)
+mesh peek     # read without marking read (--json)
+mesh watch    # block until a message arrives
+```
+
+For Claude Code, `mesh hook` is a Stop hook that hands unread messages back to
+the agent at the end of every turn (`"command": "mesh hook"` in `settings.json`).
+
+`mesh stop`, `mesh restart` and `mesh log` manage the daemon; `mesh daemon` runs
+it in the foreground for pm2 / systemd / launchd. State lives in `~/.decent-peer`
+(`DECENT_PEER_HOME` for another identity; one daemon per identity).
+
+## Profile
+
+`mesh profile` prints what friends see; `--name` (≤ 63 bytes), `--description`
+(≤ 127 bytes) and `--avatar <punk id>|none` change it, `--clear` resets it. It is
+stored in `profile.json` and applied live: friends that are online get the new
+profile within seconds, the others when they next connect. The avatar travels as
+a CryptoPunks id in the Carrier userinfo `gender` field, which is how the Beagle
+apps carry avatars; they draw `https://cryptopunks.app/cryptopunks/cryptopunk0002.png`.
+An unset name falls back to `AGENT_NAME`, then `agent`.
+
+## Web view
+
+```bash
+mesh web             # or: mesh start --web
+# open http://127.0.0.1:8770/
+```
+
+A read-only page for the human: identity and profile, friends with online state,
+pending friend requests, and each friend's chat (received messages and sent ones
+with their delivery state). Off by default; `--port <n>` for another port. It
+listens on 127.0.0.1 only, refuses requests whose Host is not localhost, sends no
+CORS headers, and never reads or serves the key file (`peer.save`).
+
+## From source
+
+```bash
 git clone https://github.com/0xli/decent-agent-mesh.git && cd decent-agent-mesh
 npm install
-
-# 2. start the daemon (keep it running)
-AGENT_NAME=my-agent node peerd.mjs >> ~/.decent-peer/peerd.log 2>&1 &
-
-# 3. see your identity
-./mesh id
+./mesh start
 ```
 
-Do the same on a second machine, exchange addresses, and shake hands:
-
-```bash
-# machine A
-./mesh friend <B-address> "hi from A"
-# machine B
-./mesh accept <A-userid>
-./mesh friend <A-address>
-# machine A
-./mesh accept <B-userid>
-```
-
-Then message either way:
-
-```bash
-./mesh send <peer-userid> "hello from this machine"
-./mesh inbox    # read unread, mark read
-```
+Cloning into `~/.claude/skills/agent-mesh` makes it a Claude Code skill
+(`SKILL.md`); use `<clone>/mesh` wherever this README says `mesh`.
 
 ## Delivery
 
@@ -86,8 +129,10 @@ node. `status.json` shows whether Express is reachable (`express[].ok`).
 ## Tests
 
 ```bash
-npm test            # outbox pump, with a stand-in peer (no network, ~5 s)
-npm run test:live   # three throwaway daemons on the live network (~5 min)
+npm test               # outbox pump, profile, web view, CLI (no network, ~10 s)
+npm run test:live      # three throwaway daemons on the live network (~5 min)
+npm run test:install   # npm pack -> npm i -g in an empty HOME -> two identities
+                       # friend, ping/pong, see each other's names (~2 min)
 ```
 
 The live test stops one friend's daemon, checks that messages to the other friend
@@ -109,7 +154,7 @@ identity-per-role model, reliability notes).
 ## Requirements
 
 - Node.js ≥ 20
-- `@decentnetwork/peer` ≥ 0.1.174 (installed via `npm install`)
+- `@decentnetwork/peer` ≥ 0.1.174 (installed with the package)
 
 ## License
 

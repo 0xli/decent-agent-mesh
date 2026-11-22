@@ -13,7 +13,9 @@
 //   deadletter.jsonl <- outbox lines that can never be sent (bad id, not a friend, gave up)
 //   requests.jsonl  <- daemon appends incoming friend requests {ts,from,hello}
 //   friends.json    <- daemon snapshots peer.friends()
-//   status.json     <- {address,userid,online,joined,express,ts}
+//   status.json     <- {name,address,userid,online,joined,express,profile,pid,web,ts}
+//   profile.json    -> what friends see {name,description,avatar}; applied live (see profile.mjs)
+//   peerd.pid       <- pid of the running daemon (one daemon per DECENT_PEER_HOME)
 // Offline delivery: messages to a friend whose daemon is down go to the Express
 // store-and-forward node (from https://beagle.chat/assets/bgservers.json) and are
 // collected when it comes back.
@@ -21,11 +23,13 @@
 // ~/.decent-peer/allow.txt (one userid/address per line); others just logged.
 //
 // Env: DECENT_PEER_DIST (path to peer dist/index.js), DECENT_PEER_HOME
-// (default ~/.decent-peer), AGENT_NAME.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+// (default ~/.decent-peer), AGENT_NAME (default display name), MESH_WEB_PORT
+// (serve the read-only web view on 127.0.0.1:<port>; `mesh start --web` sets it).
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createOutbox } from "./outbox.mjs";
+import { readProfile, toPeerOptions, validateProfile, watchProfile } from "./profile.mjs";
 
 const HOME = process.env.DECENT_PEER_HOME || join(homedir(), ".decent-peer");
 mkdirSync(HOME, { recursive: true });
@@ -33,6 +37,38 @@ const P = (f) => join(HOME, f);
 const NAME = process.env.AGENT_NAME || "agent";
 const now = () => new Date().toISOString();
 const log = (m) => console.log(`[${now()}] ${m}`);
+
+// One daemon per identity: two would pump the same outbox (every message twice) and split the inbox.
+const PIDF = P("peerd.pid");
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+if (existsSync(PIDF)) {
+  const other = Number(readFileSync(PIDF, "utf8"));
+  if (other && other !== process.pid && alive(other)) {
+    console.error(`peerd already running for ${HOME} (pid ${other}); not starting a second one`);
+    process.exit(3);
+  }
+}
+writeFileSync(PIDF, String(process.pid));
+
+process.on("unhandledRejection", (e) => log(`unhandledRejection: ${e?.message ?? e}`));
+// Mesh bug #1 evidence: never exit silently — every death leaves a trace.
+process.on("uncaughtException", (e) => { log(`uncaughtException: ${e?.stack ?? e}`); process.exit(1); });
+const dropPid = () => { try { if (Number(readFileSync(PIDF, "utf8")) === process.pid) unlinkSync(PIDF); } catch {} };
+process.on("exit", (code) => { dropPid(); try { log(`process exit code=${code}`); } catch {} });
+// Registered before the network work, so `mesh stop` during a slow join still exits cleanly.
+// Each step is guarded: what is not created yet (still in its TDZ) is skipped.
+let stopping = false;
+const shutdown = async () => {
+  if (stopping) return;
+  stopping = true;
+  try { outbox.stop(); } catch {}
+  try { profileWatch.stop(); } catch {}
+  try { await peer.stop(); } catch {}
+  try { writeStatus(false, false); } catch {}
+  process.exit(0);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 // Prefer the published npm package (portable to any Node machine); fall back to
 // a local repo build only if DECENT_PEER_DIST is explicitly set.
@@ -92,9 +128,20 @@ const allow = () => existsSync(P("allow.txt"))
   ? readFileSync(P("allow.txt"), "utf8").split("\n").map((s) => s.trim()).filter(Boolean)
   : [];
 
+// Profile goes into Peer.create so the very first friend request already carries the name.
+const PROFILE = (() => {
+  try {
+    const p = readProfile(HOME);
+    const errs = validateProfile(p);
+    if (errs.length) { log(`profile.json ignored: ${errs.join("; ")}`); return {}; }
+    return p;
+  } catch (e) { log(`profile.json unreadable (${e.message}); ignored`); return {}; }
+})();
+const DEFAULT_NAME = NAME; // $AGENT_NAME or "agent"
+
 const peer = await Peer.create({
   keyFile: P("peer.save"), bootstrapNodes: BOOTSTRAPS, expressNodes: EXPRESS,
-  compatibilityMode: "legacy", debugLabel: NAME,
+  compatibilityMode: "legacy", debugLabel: NAME, ...toPeerOptions(PROFILE, DEFAULT_NAME),
 });
 log(`express ${EXPRESS.length ? EXPRESS.map((n) => `${n.host}:${n.port}`).join(", ") : "off (config.json expressNodes: [])"}`);
 
@@ -133,16 +180,38 @@ peer.onFriendRequest(async (req) => {
 });
 
 await peer.start();
+{
+  const u = peer.userInfo();
+  log(`PROFILE name="${u.name}" description="${u.description}" avatar=${u.punkId ?? "none"}`);
+}
 
 const expressStatus = () => {
   try { return (peer.expressHealth?.() ?? []).map((h) => ({ node: h.node, ok: h.fails === 0 && h.lastOkMs > 0, doorbell: h.doorbell })); }
   catch { return []; }
 };
-const writeStatus = (joined) => writeFileSync(P("status.json"), JSON.stringify(
-  { name: NAME, address: peer.address(), userid: peer.userid(), online: true, joined, express: expressStatus(), ts: now() }, null, 2));
+let WEB_PORT = null;
+let JOINED = false;
+const advertised = () => { try { const u = peer.userInfo(); return { name: u.name, description: u.description, avatar: u.punkId ?? null }; } catch { return null; } };
+const writeStatus = (joined, online = true) => writeFileSync(P("status.json"), JSON.stringify(
+  { name: NAME, address: peer.address(), userid: peer.userid(), online, joined, express: expressStatus(),
+    profile: advertised(), pid: process.pid, web: WEB_PORT ? `http://127.0.0.1:${WEB_PORT}/` : null, ts: now() }, null, 2));
 writeStatus(false);
+// profile.json edits (`mesh profile ...`) are applied live and re-sent to every friend.
+const profileWatch = watchProfile({ home: HOME, peer, defaultName: DEFAULT_NAME, log,
+  onApply: () => { try { writeStatus(JOINED); } catch {} } });
 log(`address ${peer.address()}`);
 log(`userid  ${peer.userid()}`);
+
+// Optional read-only web view (loopback only). It reads the same files `mesh` reads.
+if (process.env.MESH_WEB_PORT) {
+  try {
+    const { startWebServer } = await import("./web.mjs");
+    const srv = await startWebServer({ home: HOME, port: Number(process.env.MESH_WEB_PORT) });
+    WEB_PORT = srv.port;
+    log(`web view http://127.0.0.1:${WEB_PORT}/ (read-only, loopback only)`);
+    writeStatus(false);
+  } catch (e) { log(`web view not started: ${e.message}`); }
+}
 
 // Resilient join: a transient bootstrap timeout must NOT kill the daemon.
 for (let attempt = 1; ; attempt++) {
@@ -150,6 +219,7 @@ for (let attempt = 1; ; attempt++) {
   catch (e) { log(`join attempt ${attempt} failed: ${e.message} — retrying in 10s`); await new Promise((r) => setTimeout(r, 10000)); }
 }
 for (let i = 0; i < 3; i++) { try { const n = await peer.announceSelf(45000); if (n.length) break; } catch (e) { log(`announce retry: ${e.message}`); } }
+JOINED = true;
 writeStatus(true);
 log("joined + announced — inbox live");
 
@@ -162,6 +232,9 @@ setInterval(() => peer.announceSelf(20000).catch(() => {}), 120000);
 const snapshotFriends = () => { try { writeFileSync(P("friends.json"), JSON.stringify(peer.friends(), null, 2)); } catch {} };
 snapshotFriends();
 setInterval(snapshotFriends, 30000);
+// A friend's name/avatar/presence change shows in friends.json at once, not 30 s later.
+peer.onFriendInfo?.(() => snapshotFriends());
+peer.onFriendConnection?.(() => snapshotFriends());
 
 // Outbox pump: each line becomes one job; sent once, retried with back-off only after a failure,
 // one job at a time per recipient (see outbox.mjs). An offline friend's text goes to Express.
@@ -169,10 +242,3 @@ const toUserid = (s) => { try { return carrierIdFromAddress(s); } catch { return
 const outbox = createOutbox({ peer, home: HOME, hasExpress: EXPRESS.length > 0, toUserid, log, name: NAME });
 outbox.start();
 
-process.on("unhandledRejection", (e) => log(`unhandledRejection: ${e?.message ?? e}`));
-// Mesh bug #1 evidence: never exit silently — every death leaves a trace.
-process.on("uncaughtException", (e) => { log(`uncaughtException: ${e?.stack ?? e}`); process.exit(1); });
-process.on("exit", (code) => { try { log(`process exit code=${code}`); } catch {} });
-const shutdown = async () => { outbox.stop(); await peer.stop().catch(() => {}); process.exit(0); };
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);

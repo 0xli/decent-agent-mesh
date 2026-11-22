@@ -3,20 +3,34 @@
 // never touches the network itself — the peerd daemon holds the warm
 // connection and does the actual P2P I/O. Safe to call from any Claude turn.
 //
+//   mesh start [--web] [--port N] run the daemon in the background (log: <home>/peerd.log)
+//   mesh stop | restart           stop / restart that daemon
+//   mesh status                   is it running, joined, who am I, what friends see
+//   mesh profile [--name <text>] [--description <text>] [--avatar <punk id>|none]
+//                                 set what friends see (applied live); no options = print
+//   mesh web [--port N]           read-only local web view on 127.0.0.1:8770 (foreground)
+//   mesh log [N]                  last N lines of the daemon log (default 40)
 //   mesh id                       print my address + userid (+ daemon online?)
-//   mesh inbox                    print unread received messages, mark read
-//   mesh peek                     print unread without marking read
+//   mesh inbox [--json]           print unread received messages, mark read
+//   mesh peek [--json]            print unread without marking read
+//   mesh watch [--interval S] [--timeout S] [--json]
+//                                 block until a message is unread, print it (not marked read)
+//   mesh hook [--path]            Claude Code Stop hook ("command": "mesh hook")
 //   mesh send <userid> <text>     queue a text (daemon sends via warm conn)
 //   mesh friend <address> [hello] queue a friend request (one-time handshake)
 //   mesh accept <userid>          queue accept of a pending friend request
 //   mesh requests                 print incoming friend requests
 //   mesh friends                  print established friends
 //   mesh whoami                   print daemon status.json
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseAvatar, punkImageUrl, readProfile, writeProfile } from "./profile.mjs";
 
 const HOME = process.env.DECENT_PEER_HOME || join(homedir(), ".decent-peer");
+const HERE = fileURLToPath(new URL(".", import.meta.url));
 const P = (f) => join(HOME, f);
 const rd = (f) => existsSync(P(f)) ? readFileSync(P(f), "utf8") : "";
 const jsonl = (f) => rd(f).split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
@@ -25,22 +39,202 @@ const out = (o) => appendFileSync(P("outbox.jsonl"), JSON.stringify(o) + "\n");
 const [cmd, ...a] = process.argv.slice(2);
 const status = () => { try { return JSON.parse(rd("status.json")); } catch { return null; } };
 
+// --flag value / --flag=value / --bool
+function flags(args, known) {
+  const o = { _: [] };
+  for (let i = 0; i < args.length; i++) {
+    const m = /^--([a-z-]+)(?:=(.*))?$/.exec(args[i]);
+    if (!m) { o._.push(args[i]); continue; }
+    const [, k, inline] = m;
+    if (!(k in known)) { console.error(`unknown option --${k}`); process.exit(1); }
+    if (known[k] === "bool") o[k] = true;
+    else if (inline !== undefined) o[k] = inline;
+    else if (i + 1 < args.length) o[k] = args[++i];
+    else { console.error(`--${k} needs a value`); process.exit(1); }
+  }
+  return o;
+}
+// Unread = inbox.jsonl entries past the .inbox.read counter (what `mesh inbox` advances).
+const unread = () => {
+  const seen = existsSync(P(".inbox.read")) ? Number(rd(".inbox.read")) || 0 : 0;
+  const all = jsonl("inbox.jsonl");
+  return { all, fresh: all.slice(seen) };
+};
+const markRead = (all) => writeFileSync(P(".inbox.read"), String(all.length));
+const msgOut = (m) => ({ ts: m.ts, from: m.from, text: m.text, via: m.via ?? "online" });
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+const daemonPid = () => { const n = Number(rd("peerd.pid")); return n && alive(n) ? n : 0; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const port = (v, dflt) => {
+  if (v === undefined || v === true) return dflt;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) { console.error(`bad port "${v}"`); process.exit(1); }
+  return n;
+};
+
+async function start(args) {
+  const o = flags(args, { web: "bool", port: "value" });
+  const pid = daemonPid();
+  if (pid) { console.log(`already running (pid ${pid}) for ${HOME}`); return; }
+  mkdirSync(HOME, { recursive: true, mode: 0o700 });
+  const env = { ...process.env, DECENT_PEER_HOME: HOME };
+  if (o.web || o.port) env.MESH_WEB_PORT = String(port(o.port, 8770));
+  const log = openSync(P("peerd.log"), "a");
+  const p = spawn(process.execPath, [join(HERE, "peerd.mjs")], { cwd: HERE, env, detached: true, stdio: ["ignore", log, log] });
+  p.unref();
+  // Wait for the daemon to claim the pid file (or die trying).
+  for (let i = 0; i < 50; i++) {
+    await sleep(100);
+    if (p.exitCode !== null) break;
+    if (Number(rd("peerd.pid")) === p.pid) break;
+  }
+  if (p.exitCode !== null || !alive(p.pid)) {
+    console.error(`daemon exited at start (code ${p.exitCode}); last log lines:`);
+    console.error(rd("peerd.log").trimEnd().split("\n").slice(-15).join("\n"));
+    process.exit(1);
+  }
+  console.log(`started (pid ${p.pid}); home ${HOME}; log ${P("peerd.log")}`);
+  if (env.MESH_WEB_PORT) {
+    // The daemon writes status.json (with the web URL, if it could listen) right after it starts.
+    let s = null;
+    for (let i = 0; i < 100 && !(s?.pid === p.pid); i++) { await sleep(100); s = status(); }
+    if (s?.pid === p.pid && s.web) console.log(`web view ${s.web}`);
+    else {
+      const why = rd("peerd.log").split("\n").reverse().find((l) => l.includes("web view not started"));
+      console.error(why ? why.replace(/^\[[^\]]*\] /, "") : "web view: not confirmed yet; see mesh status");
+    }
+  }
+  console.log("joining the network takes 10-60 s; check with: mesh status");
+}
+
+async function stop() {
+  const pid = daemonPid();
+  if (!pid) { try { unlinkSync(P("peerd.pid")); } catch {} console.log(`not running (${HOME})`); return true; }
+  process.kill(pid, "SIGTERM");
+  for (let i = 0; i < 100 && alive(pid); i++) await sleep(100);
+  if (alive(pid)) { process.kill(pid, "SIGKILL"); await sleep(300); }
+  try { if (Number(rd("peerd.pid")) === pid) unlinkSync(P("peerd.pid")); } catch {}
+  console.log(`stopped (pid ${pid})`);
+  return true;
+}
+
+const fmtProfile = (p) => [
+  `name        ${p.name ?? "(unset)"}`,
+  `description ${p.description ?? "(unset)"}`,
+  `avatar      ${p.avatar ?? "(none)"}${p.avatar !== undefined && p.avatar !== null ? `  ${punkImageUrl(p.avatar)}` : ""}`,
+].join("\n");
+
+
 switch (cmd) {
+  case "start": await start(a); break;
+  case "stop": await stop(); break;
+  case "restart": { await stop(); await start(a); break; }
+  case "status": {
+    const pid = daemonPid();
+    const s = status();
+    console.log(`daemon   ${pid ? `running (pid ${pid})` : "not running"}   home ${HOME}`);
+    if (s) {
+      const age = s.ts ? Math.round((Date.now() - Date.parse(s.ts)) / 1000) : null;
+      console.log(`joined   ${pid ? s.joined : false}${age !== null ? `   heartbeat ${age}s ago${age > 120 && pid ? " (STALE: restart with mesh restart)" : ""}` : ""}`);
+      console.log(`address  ${s.address}\nuserid   ${s.userid}`);
+      if (s.profile) console.log(`profile  name "${s.profile.name}"  description "${s.profile.description}"  avatar ${s.profile.avatar ?? "none"}`);
+      if (Array.isArray(s.express)) console.log(`express  ${s.express.length ? s.express.map((e) => `${e.node} ${e.ok ? "ok" : "not ok"}`).join(", ") : "off"}`);
+      if (s.web && pid) console.log(`web      ${s.web}`);
+    } else console.log("no status.json yet (start the daemon: mesh start)");
+    let fr = []; try { fr = JSON.parse(rd("friends.json") || "[]"); } catch {}
+    const on = fr.filter((f) => f.status === "online").length, req = fr.filter((f) => f.status === "requested").length;
+    console.log(`friends  ${fr.length - req} (${on} online)${req ? `, ${req} request(s) sent, not yet accepted` : ""}`);
+    console.log(`log      ${P("peerd.log")}`);
+    break;
+  }
+  case "profile": {
+    const o = flags(a, { name: "value", description: "value", avatar: "value", clear: "bool" });
+    if (o._.length) { console.error("usage: mesh profile [--name <text>] [--description <text>] [--avatar <punk id>|none] [--clear]"); process.exit(1); }
+    let cur;
+    try { cur = readProfile(HOME); } catch (e) { console.error(`profile.json unreadable: ${e.message}`); process.exit(1); }
+    const change = o.clear || o.name !== undefined || o.description !== undefined || o.avatar !== undefined;
+    if (!change) {
+      console.log(fmtProfile(cur));
+      if (!cur.name) console.log(`(unset name = AGENT_NAME, else "agent")`);
+      const s = status();
+      if (s?.profile && daemonPid()) console.log(`advertised  name "${s.profile.name}"  description "${s.profile.description}"  avatar ${s.profile.avatar ?? "none"}`);
+      break;
+    }
+    const next = o.clear ? {} : { ...cur };
+    if (o.name !== undefined) next.name = o.name;
+    if (o.description !== undefined) next.description = o.description;
+    try { if (o.avatar !== undefined) next.avatar = parseAvatar(o.avatar); } catch (e) { console.error(e.message); process.exit(1); }
+    mkdirSync(HOME, { recursive: true, mode: 0o700 });
+    let saved;
+    try { saved = writeProfile(HOME, next); } catch (e) { console.error(e.message); process.exit(1); }
+    console.log(fmtProfile(saved));
+    console.log(daemonPid() ? "saved; the daemon applies it within a few seconds and re-sends it to every friend online"
+                            : "saved; applied when the daemon starts (mesh start)");
+    break;
+  }
+  case "web": {
+    const o = flags(a, { port: "value" });
+    const { startWebServer, DEFAULT_WEB_PORT } = await import("./web.mjs");
+    try {
+      const srv = await startWebServer({ home: HOME, port: port(o.port, DEFAULT_WEB_PORT) });
+      console.log(`web view http://127.0.0.1:${srv.port}/  (read-only, loopback only; Ctrl-C to stop)`);
+      if (!daemonPid()) console.log("note: the daemon is not running, so nothing new will arrive (mesh start)");
+    } catch (e) { console.error(e.message); process.exit(1); }
+    break;
+  }
+  case "log": {
+    const n = Math.max(1, Number(a[0]) || 40);
+    console.log(rd("peerd.log").trimEnd().split("\n").slice(-n).join("\n") || "no log yet");
+    break;
+  }
   case "id": {
     const s = status();
-    if (!s) { console.log("daemon not started (no status.json). run: mesh daemon"); break; }
+    if (!s) { console.log("daemon not started (no status.json). run: mesh start"); break; }
     console.log(`address ${s.address}\nuserid  ${s.userid}\nonline  ${s.online} joined ${s.joined} (${s.ts})`);
     break;
   }
   case "whoami": console.log(rd("status.json") || "no status"); break;
   case "inbox": case "peek": {
-    const seenFile = ".inbox.read";
-    const seen = existsSync(P(seenFile)) ? Number(rd(seenFile)) : 0;
-    const all = jsonl("inbox.jsonl");
-    const fresh = all.slice(seen);
-    if (!fresh.length) { console.log("inbox empty"); break; }
-    for (const m of fresh) console.log(`\n─── from ${m.from} [${m.ts}] ───\n${m.text}`);
-    if (cmd === "inbox") { writeFileSync(P(seenFile), String(all.length)); console.log(`\n[${fresh.length} read]`); }
+    const o = flags(a, { json: "bool" });
+    const { all, fresh } = unread();
+    if (o.json) console.log(JSON.stringify(fresh.map(msgOut), null, 2));
+    else if (!fresh.length) console.log("inbox empty");
+    else for (const m of fresh) console.log(`\n─── from ${m.from} [${m.ts}] ───\n${m.text}`);
+    if (cmd === "inbox" && fresh.length) { markRead(all); if (!o.json) console.log(`\n[${fresh.length} read]`); }
+    break;
+  }
+  case "watch": {
+    // Block until there is an unread message, print it (like peek: not marked read), exit 0.
+    const o = flags(a, { interval: "value", json: "bool", timeout: "value" });
+    const every = Math.max(1, Number(o.interval ?? 5)) * 1000;
+    const until = o.timeout ? Date.now() + Number(o.timeout) * 1000 : Infinity;
+    for (;;) {
+      const { fresh } = unread();
+      if (fresh.length) {
+        if (o.json) console.log(JSON.stringify(fresh.map(msgOut), null, 2));
+        else { console.log("MESSAGE ARRIVED"); for (const m of fresh) console.log(`\n─── from ${m.from} [${m.ts}] ───\n${m.text}`); }
+        break;
+      }
+      if (Date.now() >= until) { if (!o.json) console.log("no message"); else console.log("[]"); process.exitCode = 2; break; }
+      await sleep(every);
+    }
+    break;
+  }
+  case "hook": {
+    // Claude Code Stop hook: "command": "mesh hook". Unread messages block the stop once and are
+    // handed back to Claude (and marked read); an empty inbox lets the turn end.
+    // `mesh hook --path` prints the bundled stop-hook.sh instead (same behaviour, finds node itself).
+    const o = flags(a, { path: "bool" });
+    if (o.path) { console.log(join(HERE, "stop-hook.sh")); break; }
+    let input = "";
+    if (!process.stdin.isTTY) { for await (const c of process.stdin) input += c; }
+    try { if (JSON.parse(input || "{}").stop_hook_active === true) break; } catch {}
+    const { all, fresh } = unread();
+    if (!fresh.length) break;
+    markRead(all);
+    const body = fresh.map((m) => `\n─── from ${m.from} [${m.ts}] ───\n${m.text}`).join("\n");
+    process.stdout.write(JSON.stringify({ decision: "block",
+      reason: `📨 Incoming Decent-mesh message(s) — reply via \`mesh send <userid> "..."\`:\n${body}\n\n[${fresh.length} read]` }));
     break;
   }
   case "send": {
@@ -84,6 +278,24 @@ switch (cmd) {
   }
   case "requests": { const r = jsonl("requests.jsonl"); console.log(r.length ? JSON.stringify(r, null, 2) : "no requests"); break; }
   case "friends": console.log(rd("friends.json") || "no friends yet"); break;
+  case "daemon": {
+    // foreground daemon (for pm2 / systemd / launchd): same as `node peerd.mjs`
+    process.env.DECENT_PEER_HOME = HOME;
+    const o = flags(a, { web: "bool", port: "value" });
+    if (o.web || o.port) process.env.MESH_WEB_PORT = String(port(o.port, 8770));
+    await import("./peerd.mjs");
+    break;
+  }
   default:
-    console.log("mesh id|inbox|peek|send|friend|accept|requests|friends|whoami\n(run the daemon separately: node peerd.mjs)");
+    console.log(`mesh — P2P messaging between agents over the Decent Network
+  daemon:   mesh start [--web] [--port 8770] | stop | restart | status | log [N]
+            mesh daemon [--web]   (foreground, for pm2/systemd/launchd)
+  profile:  mesh profile [--name <text>] [--description <text>] [--avatar <punk id>|none] [--clear]
+  friends:  mesh id | friend <address> [hello] | requests | accept <userid> | friends
+  messages: mesh send <userid> <text> | inbox [--json] | peek [--json]
+            mesh watch [--interval 5] [--timeout S] [--json]   (blocks until a message is unread)
+            mesh hook [--path]   (Claude Code Stop hook: "command": "mesh hook")
+  web view: mesh web [--port 8770]   (read-only, 127.0.0.1 only)
+home: ${HOME}  (set DECENT_PEER_HOME for another identity)`);
+    if (cmd && cmd !== "help" && cmd !== "--help" && cmd !== "-h") process.exit(1);
 }

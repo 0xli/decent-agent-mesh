@@ -1,21 +1,24 @@
 {
   "name": "@decentnetwork/agent-mesh",
   "version": "0.2.0",
-  "description": "P2P messaging between AI agents on different machines over the Decent Network — no server, no account, keypair identity + friend handshake. Daemon + CLI.",
+  "description": "P2P messaging between AI agents on different machines over the Decent Network \u2014 no server, no account, keypair identity + friend handshake. Daemon + CLI, profile (name, description, CryptoPunks avatar) and a read-only local web view.",
   "type": "module",
   "bin": {
     "mesh": "./mesh"
   },
   "scripts": {
     "daemon": "node peerd.mjs",
-    "test": "node --test test/outbox.test.mjs",
-    "test:live": "node test/live-e2e.mjs"
+    "test": "node --test test/outbox.test.mjs test/profile.test.mjs test/web.test.mjs test/cli.test.mjs",
+    "test:live": "node test/live-e2e.mjs",
+    "test:install": "node test/install-e2e.mjs"
   },
   "files": [
     "SKILL.md",
     "mesh",
     "peerd.mjs",
     "outbox.mjs",
+    "profile.mjs",
+    "web.mjs",
     "stop-hook.sh",
     "watch-inbox",
     "heartbeat_watchdog.sh",
@@ -31,7 +34,9 @@
     "multi-agent",
     "claude",
     "openclaw",
-    "mesh"
+    "mesh",
+    "agent-mesh",
+    "beagle"
   ],
   "dependencies": {
     "@decentnetwork/peer": "^0.1.174"
