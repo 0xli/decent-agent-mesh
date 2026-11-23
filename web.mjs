@@ -4,6 +4,9 @@
 //   mesh web [--port 8770]          serve it (foreground) for $DECENT_PEER_HOME
 //   mesh start --web [--port 8770]  the daemon serves it as well
 //
+// Avatars: a friend's avatarUrl (https) or its CryptoPunks id via www.larvalabs.com. The page
+// loads those images straight from their hosts (no referrer), as the Beagle apps do.
+//
 // Safety:
 //   - binds 127.0.0.1 only; requests whose Host header is not 127.0.0.1/localhost are refused
 //     (stops DNS-rebinding pages from reading it); no CORS headers; GET/HEAD only.
@@ -52,7 +55,10 @@ export function buildState(home, { maxPerChat = 500 } = {}) {
     const o = pick(f, ["userid", "address", "name", "description", "punkId", "status", "protoVersion",
       "platform", "appVersion", "requestedAt", "acceptedAt", "hello"]);
     o.id = f.userid ?? f.pubkey;
-    if (Number.isInteger(f.punkId)) o.avatarUrl = punkImageUrl(f.punkId);
+    // Same draw order as the SDK / Beagle apps: the friend's avatarUrl, then its CryptoPunks id.
+    const url = typeof f.avatarUrl === "string" && /^https:\/\/[^\s"'<>]+$/.test(f.avatarUrl) ? f.avatarUrl : null;
+    if (url) o.avatarUrl = url;
+    else if (Number.isInteger(f.punkId)) o.avatarUrl = punkImageUrl(f.punkId);
     return o;
   });
   const byKey = new Map();
@@ -128,7 +134,7 @@ h1{font-size:16px;margin:0 0 4px}h2{font-size:12px;text-transform:uppercase;colo
 <script>
 const $=(id)=>document.getElementById(id);
 const el=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;};
-const avatar=(url)=>{const i=el("img","av");i.alt="";i.referrerPolicy="no-referrer";if(url)i.src=url;return i;};
+const avatar=(url)=>{if(!url)return el("div","av");const i=el("img","av");i.alt="";i.referrerPolicy="no-referrer";i.onerror=()=>i.replaceWith(el("div","av"));i.src=url;return i;};
 const when=(ts)=>ts?new Date(ts).toLocaleString():"";
 let sel=null,last=null;
 function render(s){
@@ -178,7 +184,7 @@ const SEC_HEADERS = {
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
   "Cache-Control": "no-store",
-  "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src https://cryptopunks.app; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
 /** Create (not listen) the server. */

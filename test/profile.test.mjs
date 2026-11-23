@@ -22,8 +22,8 @@ test("avatar parsing and the punk image url", () => {
   assert.throws(() => parseAvatar("-1"));
   assert.throws(() => parseAvatar("2.5"));
   assert.throws(() => parseAvatar("punk"));
-  assert.equal(punkImageUrl(2), "https://cryptopunks.app/cryptopunks/cryptopunk0002.png");
-  assert.equal(punkImageUrl(7804), "https://cryptopunks.app/cryptopunks/cryptopunk7804.png");
+  assert.equal(punkImageUrl(2), "https://www.larvalabs.com/cryptopunks/cryptopunk0002.png");
+  assert.equal(punkImageUrl(7804), "https://www.larvalabs.com/cryptopunks/cryptopunk7804.png");
 });
 
 test("limits: name 63 bytes, description 127 bytes (Carrier UserInfo)", () => {

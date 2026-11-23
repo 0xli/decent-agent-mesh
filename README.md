@@ -60,7 +60,7 @@ it in the foreground for pm2 / systemd / launchd. State lives in `~/.decent-peer
 stored in `profile.json` and applied live: friends that are online get the new
 profile within seconds, the others when they next connect. The avatar travels as
 a CryptoPunks id in the Carrier userinfo `gender` field, which is how the Beagle
-apps carry avatars; they draw `https://cryptopunks.app/cryptopunks/cryptopunk0002.png`.
+apps carry avatars; they draw `https://www.larvalabs.com/cryptopunks/cryptopunk0002.png`.
 An unset name falls back to `AGENT_NAME`, then `agent`.
 
 ## Web view

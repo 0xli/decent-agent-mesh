@@ -65,7 +65,7 @@ So `mesh` commands are instant and safe to run in any turn.
   mesh profile --name "Research Bot" --description "Answers questions about papers" --avatar 2
   ```
   `--avatar` is a CryptoPunks id (0–9999); Beagle shows
-  `https://cryptopunks.app/cryptopunks/cryptopunk0002.png`. Name ≤ 63 bytes,
+  `https://www.larvalabs.com/cryptopunks/cryptopunk0002.png`. Name ≤ 63 bytes,
   description ≤ 127 bytes. All three are optional; an unset name falls back to
   `AGENT_NAME`, then `agent`. `mesh profile` alone prints it; a change made while
   the daemon runs is applied within seconds and re-sent to every online friend.

@@ -26,7 +26,7 @@ before(async () => {
   put("profile.json", { name: "Me Bot", description: "hi", avatar: 2 });
   put("friends.json", [
     { pubkey: BOB, userid: BOB, name: "Bob", description: "bob desc", punkId: 7804, status: "online", protoVersion: 2, dhtPubkey: "DHT", secretField: SECRET },
-    { pubkey: CAROL, userid: CAROL, name: "Carol", status: "offline", acceptedAt: 1 },
+    { pubkey: CAROL, userid: CAROL, name: "Carol", status: "offline", acceptedAt: 1, punkId: 5, avatarUrl: "https://ens-gateway.beaglechat.workers.dev/avatar/carol.beagles.eth?v=1" },
     { pubkey: "Pending1", userid: "Pending1", status: "requested", requestedAt: 1 },
   ]);
   line("requests.jsonl", { ts: "2026-11-22T10:00:00.000Z", from: BOB, hello: "old request, now a friend" });
@@ -62,9 +62,11 @@ test("state: identity, profile, friends, pending requests, chats", () => {
   const s = buildState(home);
   assert.equal(s.status.userid, ME);
   assert.equal(s.profile.advertised.name, "Me Bot");
-  assert.equal(s.profile.avatarUrl, "https://cryptopunks.app/cryptopunks/cryptopunk0002.png");
+  assert.equal(s.profile.avatarUrl, "https://www.larvalabs.com/cryptopunks/cryptopunk0002.png");
   assert.deepEqual(s.friends.map((f) => [f.name ?? f.id, f.status]), [["Bob", "online"], ["Carol", "offline"], ["Pending1", "requested"]]);
-  assert.equal(s.friends[0].avatarUrl, "https://cryptopunks.app/cryptopunks/cryptopunk7804.png");
+  assert.equal(s.friends[0].avatarUrl, "https://www.larvalabs.com/cryptopunks/cryptopunk7804.png");
+  assert.equal(s.friends[1].avatarUrl, "https://ens-gateway.beaglechat.workers.dev/avatar/carol.beagles.eth?v=1", "avatarUrl wins over punkId");
+  assert.equal(s.friends[2].avatarUrl, undefined);
   assert.deepEqual(s.requests.map((r) => r.userid), [DAVE], "a request from someone who is now a friend is not pending");
   assert.deepEqual(s.chats[BOB].map((m) => [m.dir, m.text, m.state ?? m.via]), [["out", "ping", "acked"], ["in", "pong <b>bold</b>", "online"]]);
   assert.deepEqual(s.chats[CAROL].map((m) => [m.dir, m.state ?? m.via]), [["out", "pending"], ["in", "express"]]);

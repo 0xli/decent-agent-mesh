@@ -5,7 +5,8 @@
 //                Unset falls back to $AGENT_NAME, then "agent".
 //   description  status line under the name, at most 127 bytes.
 //   avatar       a CryptoPunks id 0..9999. Beagle carries it in the Carrier userinfo
-//                `gender` field and draws https://cryptopunks.app/cryptopunks/cryptopunkNNNN.png.
+//                `gender` field and draws https://www.larvalabs.com/cryptopunks/cryptopunkNNNN.png
+//                (the URL the iOS app and beagle-web use; cryptopunks.app 404s).
 //
 // `mesh profile` writes the file; the daemon applies it at start and again whenever the
 // file changes (peer.setUserInfo re-sends the profile to every friend that is online).
@@ -14,7 +15,7 @@ import { join } from "node:path";
 
 export const LIMITS = { name: 63, description: 127, avatarMax: 9999 };
 
-export const punkImageUrl = (id) => `https://cryptopunks.app/cryptopunks/cryptopunk${String(id).padStart(4, "0")}.png`;
+export const punkImageUrl = (id) => `https://www.larvalabs.com/cryptopunks/cryptopunk${String(id).padStart(4, "0")}.png`;
 
 /** Parse a user-supplied avatar value. Returns an integer id, null for "none", or throws. */
 export function parseAvatar(v) {
