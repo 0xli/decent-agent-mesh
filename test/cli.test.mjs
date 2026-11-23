@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,5 +61,28 @@ test("hook: empty inbox = silent; unread = block once and mark read; stop_hook_a
     const path = run(home, ["hook", "--path"]).stdout.trim();
     assert.ok(path.endsWith("stop-hook.sh") && existsSync(path));
     assert.match(readFileSync(path, "utf8"), /stop_hook_active/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("a daemon started outside this mesh (older copy / pm2, no pid file) blocks start, shows in status", () => {
+  const home = mkdtempSync(join(tmpdir(), "mesh-cli-"));
+  try {
+    writeFileSync(join(home, "status.json"), JSON.stringify({ name: "agent", address: "A", userid: "U", online: true, joined: true, ts: new Date().toISOString() }));
+    let r = run(home, ["start"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /already running .*not one this mesh started/s);
+    assert.ok(!existsSync(join(home, "peerd.pid")), "no second daemon was spawned");
+    assert.match(run(home, ["status"]).stdout, /running \(started outside this mesh/);
+    assert.equal(run(home, ["stop"]).status, 1);
+    // peerd itself refuses too (pm2 starting the new version while the old one still runs)
+    const p = spawnSync(process.execPath, [join(dirname(MESH), "peerd.mjs")], { env: { ...process.env, DECENT_PEER_HOME: home }, encoding: "utf8", timeout: 20000 });
+    assert.equal(p.status, 3, p.stderr);
+    assert.match(p.stderr, /already running/);
+    // a stale heartbeat (dead daemon) does not block
+    writeFileSync(join(home, "status.json"), JSON.stringify({ online: true, joined: true, ts: new Date(Date.now() - 300_000).toISOString() }));
+    assert.match(run(home, ["status"]).stdout, /daemon\s+not running/);
+    // a stopped 0.2 daemon (online false) does not block
+    writeFileSync(join(home, "status.json"), JSON.stringify({ online: false, ts: new Date().toISOString(), pid: 999999 }));
+    assert.match(run(home, ["status"]).stdout, /daemon\s+not running/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

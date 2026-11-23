@@ -26,6 +26,15 @@ mesh start
 mesh status
 ```
 
+If the shell says `mesh: command not found`, npm's global bin folder is not on your
+PATH: run `npm prefix -g` and add the `bin` folder under it to PATH (with nvm, use
+the same Node version you installed with).
+
+Already running an older copy of agent-mesh (a clone started with `node peerd.mjs`
+or pm2)? Leave it running: `mesh web`, `inbox`, `send` and `profile` work with it,
+and `mesh start` refuses to start a second daemon on the same identity. To switch,
+stop the old one where it was started (e.g. `pm2 stop <name>`), then `mesh start`.
+
 Do the same on a second machine, exchange addresses (`mesh id`), and shake hands:
 
 ```bash

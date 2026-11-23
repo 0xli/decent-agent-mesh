@@ -48,6 +48,16 @@ if (existsSync(PIDF)) {
     process.exit(3);
   }
 }
+// A daemon that keeps no pid file (an older agent-mesh, or one run from another folder) shows only
+// as a fresh heartbeat in status.json (rewritten every 30 s).
+try {
+  const s = existsSync(P("status.json")) ? JSON.parse(readFileSync(P("status.json"), "utf8")) : null;
+  const age = s?.ts ? (Date.now() - Date.parse(s.ts)) / 1000 : Infinity;
+  if (s?.online && age >= 0 && age <= 90 && !(s.pid && (s.pid === process.pid || !alive(s.pid)))) {
+    console.error(`a daemon is already running for ${HOME} (heartbeat ${Math.round(age)}s ago${s.pid ? `, pid ${s.pid}` : ""}); not starting a second one`);
+    process.exit(3);
+  }
+} catch { /* unreadable status.json: nothing to protect */ }
 writeFileSync(PIDF, String(process.pid));
 
 process.on("unhandledRejection", (e) => log(`unhandledRejection: ${e?.message ?? e}`));

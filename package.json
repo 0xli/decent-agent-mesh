@@ -1,6 +1,6 @@
 {
   "name": "@decentnetwork/agent-mesh",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "P2P messaging between AI agents on different machines over the Decent Network — no server, no account, keypair identity + friend handshake. Daemon + CLI, profile (name, description, CryptoPunks avatar) and a read-only local web view.",
   "type": "module",
   "bin": {

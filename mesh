@@ -63,7 +63,27 @@ const unread = () => {
 const markRead = (all) => writeFileSync(P(".inbox.read"), String(all.length));
 const msgOut = (m) => ({ ts: m.ts, from: m.from, text: m.text, via: m.via ?? "online" });
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
-const daemonPid = () => { const n = Number(rd("peerd.pid")); return n && alive(n) ? n : 0; };
+const daemonPid = () => {
+  const n = Number(rd("peerd.pid"));
+  if (n && alive(n)) return n;
+  const s = status(); // 0.2+ daemons also record their pid in status.json
+  return s?.pid && s.online && alive(s.pid) ? s.pid : 0;
+};
+// A daemon this mesh did not start (an older copy of agent-mesh, or one run by pm2 from another
+// folder) writes no pid we can use; it shows only as a fresh heartbeat in status.json.
+const FRESH_S = 90; // the daemon rewrites status.json every 30 s
+const foreignDaemon = () => {
+  if (daemonPid()) return null;
+  const s = status();
+  if (!s?.online || !s.ts) return null;
+  const age = Math.round((Date.now() - Date.parse(s.ts)) / 1000);
+  if (!(age >= 0 && age <= FRESH_S)) return null;
+  if (s.pid && !alive(s.pid)) return null;
+  return { age };
+};
+const foreignMsg = (f) => `a daemon is already running for ${HOME} (heartbeat ${f.age}s ago), but not one this mesh started:\n` +
+  `an older copy of agent-mesh or a pm2/launchd job. Stop it where it was started (e.g. pm2 stop <name>) before\n` +
+  `mesh start, or two daemons would send every message twice. mesh web, inbox and send work alongside it.`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = (v, dflt) => {
   if (v === undefined || v === true) return dflt;
@@ -76,6 +96,8 @@ async function start(args) {
   const o = flags(args, { web: "bool", port: "value" });
   const pid = daemonPid();
   if (pid) { console.log(`already running (pid ${pid}) for ${HOME}`); return; }
+  const f = foreignDaemon();
+  if (f) { console.error(foreignMsg(f)); process.exit(1); }
   mkdirSync(HOME, { recursive: true, mode: 0o700 });
   const env = { ...process.env, DECENT_PEER_HOME: HOME };
   if (o.web || o.port) env.MESH_WEB_PORT = String(port(o.port, 8770));
@@ -109,6 +131,8 @@ async function start(args) {
 
 async function stop() {
   const pid = daemonPid();
+  const f = !pid && foreignDaemon();
+  if (f) { console.error(foreignMsg(f).replace(" before\nmesh start", "").replace(", or two daemons would send every message twice", "")); process.exit(1); }
   if (!pid) { try { unlinkSync(P("peerd.pid")); } catch {} console.log(`not running (${HOME})`); return true; }
   process.kill(pid, "SIGTERM");
   for (let i = 0; i < 100 && alive(pid); i++) await sleep(100);
@@ -132,14 +156,15 @@ switch (cmd) {
   case "status": {
     const pid = daemonPid();
     const s = status();
-    console.log(`daemon   ${pid ? `running (pid ${pid})` : "not running"}   home ${HOME}`);
+    const f = !pid && foreignDaemon();
+    console.log(`daemon   ${pid ? `running (pid ${pid})` : f ? "running (started outside this mesh: older copy or pm2; pid not recorded)" : "not running"}   home ${HOME}`);
     if (s) {
       const age = s.ts ? Math.round((Date.now() - Date.parse(s.ts)) / 1000) : null;
-      console.log(`joined   ${pid ? s.joined : false}${age !== null ? `   heartbeat ${age}s ago${age > 120 && pid ? " (STALE: restart with mesh restart)" : ""}` : ""}`);
+      console.log(`joined   ${pid || f ? s.joined : false}${age !== null ? `   heartbeat ${age}s ago${age > 120 && pid ? " (STALE: restart with mesh restart)" : ""}` : ""}`);
       console.log(`address  ${s.address}\nuserid   ${s.userid}`);
       if (s.profile) console.log(`profile  name "${s.profile.name}"  description "${s.profile.description}"  avatar ${s.profile.avatar ?? "none"}`);
       if (Array.isArray(s.express)) console.log(`express  ${s.express.length ? s.express.map((e) => `${e.node} ${e.ok ? "ok" : "not ok"}`).join(", ") : "off"}`);
-      if (s.web && pid) console.log(`web      ${s.web}`);
+      if (s.web && (pid || f)) console.log(`web      ${s.web}`);
     } else console.log("no status.json yet (start the daemon: mesh start)");
     let fr = []; try { fr = JSON.parse(rd("friends.json") || "[]"); } catch {}
     const on = fr.filter((f) => f.status === "online").length, req = fr.filter((f) => f.status === "requested").length;
@@ -157,7 +182,7 @@ switch (cmd) {
       console.log(fmtProfile(cur));
       if (!cur.name) console.log(`(unset name = AGENT_NAME, else "agent")`);
       const s = status();
-      if (s?.profile && daemonPid()) console.log(`advertised  name "${s.profile.name}"  description "${s.profile.description}"  avatar ${s.profile.avatar ?? "none"}`);
+      if (s?.profile && (daemonPid() || foreignDaemon())) console.log(`advertised  name "${s.profile.name}"  description "${s.profile.description}"  avatar ${s.profile.avatar ?? "none"}`);
       break;
     }
     const next = o.clear ? {} : { ...cur };
@@ -168,7 +193,7 @@ switch (cmd) {
     let saved;
     try { saved = writeProfile(HOME, next); } catch (e) { console.error(e.message); process.exit(1); }
     console.log(fmtProfile(saved));
-    console.log(daemonPid() ? "saved; the daemon applies it within a few seconds and re-sends it to every friend online"
+    console.log(daemonPid() || foreignDaemon() ? "saved; the daemon applies it within a few seconds and re-sends it to every friend online"
                             : "saved; applied when the daemon starts (mesh start)");
     break;
   }
@@ -178,7 +203,7 @@ switch (cmd) {
     try {
       const srv = await startWebServer({ home: HOME, port: port(o.port, DEFAULT_WEB_PORT) });
       console.log(`web view http://127.0.0.1:${srv.port}/  (read-only, loopback only; Ctrl-C to stop)`);
-      if (!daemonPid()) console.log("note: the daemon is not running, so nothing new will arrive (mesh start)");
+      if (!daemonPid() && !foreignDaemon()) console.log("note: the daemon is not running, so nothing new will arrive (mesh start)");
     } catch (e) { console.error(e.message); process.exit(1); }
     break;
   }

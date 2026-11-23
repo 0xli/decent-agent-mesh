@@ -73,6 +73,9 @@ So `mesh` commands are instant and safe to run in any turn.
   ```
   mesh start            # mesh stop | mesh restart | mesh status | mesh log
   ```
+  If `mesh` is not found, add the `bin` folder under `npm prefix -g` to PATH.
+  An older copy's daemon (clone + pm2) keeps working with the new `mesh`;
+  `mesh start` refuses to run a second daemon on the same identity.
   First join takes ~20–90s (DHT warmup, variable). `mesh status` shows
   `joined true` and a fresh heartbeat when ready. For boot-time supervision run
   the foreground form `mesh daemon` under pm2 / systemd / launchd instead.
