@@ -79,9 +79,12 @@ mesh web             # or: mesh start --web
 # open http://127.0.0.1:8770/
 ```
 
-A read-only page for the human: identity and profile, friends with online state,
-pending friend requests, and each friend's chat (received messages and sent ones
-with their delivery state). Off by default; `--port <n>` for another port. It
+The Beagle chat UI (`@decentnetwork/beagle-ui`, the same components as the Beagle
+desktop app and beagle.chat), read-only, for the human: the agent's friends with
+avatars and online state, pending friend requests, each conversation as a dialog,
+and the agent's profile. Only the Chat and Profile tabs are shown. Replies and
+accepts stay in the CLI (`mesh send`, `mesh accept`). A plain fallback page is at
+`/simple`. Off by default; `--port <n>` for another port. It
 listens on 127.0.0.1 only, refuses requests whose Host is not localhost, sends no
 CORS headers, and never reads or serves the key file (`peer.save`).
 

@@ -105,10 +105,10 @@ So `mesh` commands are instant and safe to run in any turn.
 
 ## Local web view (for the human)
 
-`mesh web` (or `mesh start --web`) serves a read-only page at
-http://127.0.0.1:8770/ — identity and profile, friends with online state,
-pending friend requests, and each friend's chat (inbox and outbox, with the
-delivery state of every sent line). `--port <n>` picks another port. It is off by
+`mesh web` (or `mesh start --web`) serves the Beagle chat UI, read-only, at
+http://127.0.0.1:8770/ — friends with avatars and online state, pending friend
+requests, each conversation as a dialog (with the delivery state of every sent
+line), and the profile. Chat and Profile tabs only; `/simple` is a plain fallback. `--port <n>` picks another port. It is off by
 default, listens on 127.0.0.1 only, sends no CORS headers, refuses foreign Host
 headers, and never reads or serves `peer.save`. Sending, accepting and profile
 changes stay in the `mesh` CLI.

@@ -181,7 +181,13 @@ peer.onText((msg) => {
 });
 peer.onFriendRequest(async (req) => {
   const from = req.userid ?? req.pubkey;
-  appendFileSync(P("requests.jsonl"), JSON.stringify({ ts: now(), from, hello: req.hello ?? "" }) + "\n");
+  // name/description/avatar travel in the request; the web view shows them on the request card.
+  const extra = {};
+  if (req.name) extra.name = req.name;
+  if (req.description) extra.description = req.description;
+  if (Number.isInteger(req.punkId)) extra.punkId = req.punkId;
+  if (typeof req.avatarUrl === "string" && req.avatarUrl.startsWith("https://")) extra.avatarUrl = req.avatarUrl;
+  appendFileSync(P("requests.jsonl"), JSON.stringify({ ts: now(), from, hello: req.hello ?? "", ...extra }) + "\n");
   log(`FRIEND-REQ ${from} "${req.hello ?? ""}"`);
   if (allow().some((a) => from?.includes(a) || a.includes(from))) {
     try { await peer.acceptFriendRequest(req.pubkey); log(`AUTO-ACCEPTED ${from}`); }

@@ -75,7 +75,7 @@ test("state: identity, profile, friends, pending requests, chats", () => {
 });
 
 test("never serves key material or unlisted fields", async () => {
-  for (const p of ["/", "/api/state", "/peer.save", "/../peer.save", "/config.json", "/%2e%2e/peer.save"]) {
+  for (const p of ["/", "/simple", "/boot.js", "/api/state", "/api/desktop", "/api/chat-history?peer=" + BOB, "/peer.save", "/../peer.save", "/config.json", "/%2e%2e/peer.save"]) {
     const r = await get(p);
     assert.ok(!r.body.includes(SECRET), `${p} leaked key material`);
   }
@@ -93,14 +93,54 @@ test("read-only, no CORS, rejects foreign Host headers", async () => {
   assert.equal((await get("/", { host: "localhost:8770" })).status, 200);
   assert.equal((await get("/api/state", { host: "evil.example:8770" })).status, 403);
   assert.equal((await get("/api/state", { host: "192.168.1.5:8770" })).status, 403);
-  for (const m of ["POST", "PUT", "DELETE"]) assert.equal((await get("/api/state", { method: m })).status, 405);
+  for (const m of ["PUT", "DELETE"]) assert.equal((await get("/api/state", { method: m })).status, 405);
   const before = readFileSync(join(home, "outbox.jsonl"), "utf8");
-  await get("/api/state?send=1", { method: "POST" });
+  for (const p of ["/api/chat-send", "/api/accept", "/api/set-profile", "/api/add"]) {
+    const r = await get(p, { method: "POST" });
+    assert.match(JSON.parse(r.body).error, /read-only/);
+  }
   assert.equal(readFileSync(join(home, "outbox.jsonl"), "utf8"), before);
 });
 
-test("page renders text with textContent (no innerHTML)", async () => {
-  const page = (await get("/")).body;
+test("simple page renders text with textContent (no innerHTML)", async () => {
+  const page = (await get("/simple")).body;
   assert.ok(!page.includes("innerHTML"));
   assert.match(page, /textContent/);
+});
+
+test("Beagle UI host: shell, assets, /api/desktop, /api/chat-history, /api/punk", async () => {
+  const shell = await get("/");
+  assert.match(shell.body, /\/vendor\/react\.js[\s\S]*\/boot\.js/);
+  assert.match(shell.headers["content-security-policy"], /script-src 'self'/);
+  assert.match((await get("/boot.js")).body, /hostTabs: \["chat", "profile"\]/);
+  for (const a of ["/vendor/react.js", "/vendor/react-dom.js", "/vendor/beagle-ui.js", "/vendor/chat-components.js"]) {
+    const r = await get(a);
+    assert.equal(r.status, 200, a);
+    assert.ok(r.body.length > 5000, a);
+  }
+  assert.match((await get("/vendor/beagle-ui.js")).body, /export \{[\s\S]*mount/);
+
+  const d = JSON.parse((await get("/api/desktop")).body);
+  assert.equal(d.me.name, "Me Bot");
+  assert.equal(d.me.userId, ME);
+  assert.equal(d.me.punkId, 2);
+  const bob = d.peers.find((p) => p.id === BOB);
+  assert.equal(bob.alias, "Bob"); assert.equal(bob.online, true); assert.equal(bob.punkId, 7804);
+  assert.equal(bob.avatarUrl, null, "a punk is drawn by beagle-ui itself, not passed as a URL");
+  assert.equal(bob.lastMsg, "pong <b>bold</b>"); assert.equal(bob.lastDir, "in");
+  assert.equal(d.peers.find((p) => p.id === CAROL).avatarUrl, "https://ens-gateway.beaglechat.workers.dev/avatar/carol.beagles.eth?v=1");
+  assert.equal(d.peers.find((p) => p.id === "Pending1").pending, true);
+  assert.deepEqual(d.requests.map((r) => [r.userid, r.hello]), [[DAVE, "hi, I am Dave"]]);
+
+  const h = JSON.parse((await get(`/api/chat-history?peer=${BOB}&limit=30`)).body).chats[BOB];
+  assert.deepEqual(h.map((m) => [m.dir, m.text, m.status ?? m.via]), [["out", "ping", "sent"], ["in", "pong <b>bold</b>", "online"]]);
+  assert.equal(h[0].confirmed, true);
+  assert.equal(typeof h[0].ts, "number");
+  const before = h[1].ts;
+  assert.deepEqual(JSON.parse((await get(`/api/chat-history?peer=${BOB}&limit=30&before=${before}`)).body).chats[BOB].map((m) => m.text), ["ping"]);
+  const c = JSON.parse((await get(`/api/chat-history?peer=${CAROL}`)).body).chats[CAROL];
+  assert.equal(c.find((m) => m.dir === "out").status, "queued");
+
+  assert.deepEqual(JSON.parse((await get("/api/punk/1234")).body), { ok: true, punk: { id: 1234, image: "https://www.larvalabs.com/cryptopunks/cryptopunk1234.png" } });
+  assert.equal(JSON.parse((await get("/api/update-check")).body).ok, false);
 });
